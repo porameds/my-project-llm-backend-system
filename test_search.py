@@ -3,7 +3,7 @@ from langchain_postgres import PGVector
 from sqlalchemy import create_engine
 
 CONNECTION_STRING = "postgresql+psycopg2://postgres:User%40FujikuraN1@localhost/llm_db"
-COLLECTION_NAME = "company_documents"
+COLLECTION_NAME = "company_documents_md"
 
 # โหลด Embedding Model ตัวเดิมที่ใช้ตอนเซฟ
 embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
@@ -17,7 +17,7 @@ vector_store = PGVector(
 )
 
 #  ทดลองตั้งคำถาม
-query = "ถ้าทำโอทีดึกๆ เบิกค่าแท็กซี่ได้เท่าไหร่?"
+query = "ขั้นตอนการเปิดระบบเซิร์ฟเวอร์มีอะไรบ้าง"
 print(f" คำถาม: {query}\n")
 
 # สั่งให้ค้นหาข้อความที่คล้ายคลึงที่สุด 2 อันดับแรก (Top-K)
