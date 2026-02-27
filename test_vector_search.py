@@ -4,7 +4,7 @@ from sqlalchemy import create_engine
 
 #  ตั้งค่าพื้นฐาน (ต้องตรงกับตอนที่นำเข้าข้อมูล)
 CONNECTION_STRING = "postgresql+psycopg2://postgres:User%40FujikuraN1@localhost/llm_db"
-COLLECTION_NAME = "company_documents_md_3" 
+COLLECTION_NAME = "company_documents_md_4" 
 
 def test_retrieval():
     print(" กำลังโหลด Embedding Model (bge-m3)...")

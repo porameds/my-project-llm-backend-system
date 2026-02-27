@@ -3,3 +3,9 @@ __pycache__/
 *.py[cod]
 .env
 *.csh
+
+marker_env/
+__pycache__/
+*.py[cod]
+.env
+*.csh
