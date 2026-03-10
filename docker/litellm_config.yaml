@@ -1,0 +1,46 @@
+model_list:
+  - model_name: deepseek-r1
+    litellm_params:
+      model: ollama/deepseek-r1:14b
+      api_base: http://localhost:11434
+
+  - model_name: gemma-2
+    litellm_params:
+      model: ollama/gemma2:9b
+      api_base: http://localhost:11434
+
+  - model_name: llama-3
+    litellm_params:
+      model: ollama/llama3.1:8b
+      api_base: http://localhost:11434
+
+  - model_name: qwen-3
+    litellm_params:
+      model: ollama/qwen2.5:14b
+      api_base: http://localhost:11434
+
+litellm_settings:
+  # drop_params สำคัญมากเวลาใช้ Langchain ต่อกับ Ollama
+  # มันจะช่วยกรองพารามิเตอร์บางตัวที่ OpenAI มี แต่ Ollama ไม่มีออกไปให้ ทำให้ไม่เกิด Error 400
+  drop_params: true
+
+# model_list:
+#   - model_name: deepseek-r1
+#     litellm_params:
+#       model: ollama/deepseek-r1:14b
+#       api_base: http://localhost:11434
+
+#   - model_name: gemma-2
+#     litellm_params:
+#       model: ollama/gemma2:9b
+#       api_base: http://localhost:11434
+
+#   - model_name: llama-3
+#     litellm_params:
+#       model: ollama/llama3.1:8b
+#       api_base: http://localhost:11434
+
+#   - model_name: qwen-3
+#     litellm_params:
+#       model: ollama/qwen2.5:14b
+#       api_base: http://localhost:11434

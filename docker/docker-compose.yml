@@ -1,0 +1,34 @@
+
+services:
+  super-agent-api:
+    build:
+      context: ../                  # ถอยกลับไปมองที่โฟลเดอร์หลัก
+      dockerfile: docker/Dockerfile # ชี้เป้าว่า Dockerfile อยู่ในโฟลเดอร์นี้นะ
+    container_name: company-super-agent
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - /home/smf-llm-ai/llm_backend_system/my_llm_backend_system/marker_env:/home/smf-llm-ai/llm_backend_system/my_llm_backend_system/marker_env
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - TZ=Asia/Bangkok
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: litellm_proxy
+    network_mode: "host"
+    volumes:
+      - ./litellm_config.yaml:/app/config.yaml # Map ไฟล์ config เข้าไปใน Container
+    command: 
+      - "--config"
+      - "/app/config.yaml"
+      - "--detailed_debug" # เปิด Debug ไว้ดู Log เวลา AI ตอบช้า
+    env_file:            
+      - ../.env
+    environment:
+      - TZ=Asia/Bangkok
+      # - LITELLM_MASTER_KEY=sk-master-smf-1234 # Key ที่ตั้งไว้ใน FastAPI
+    restart: unless-stopped
