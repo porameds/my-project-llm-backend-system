@@ -17,3 +17,8 @@ langchain-postgres==0.0.17
 # --- Embeddings (สำหรับ Vector DB) ---
 langchain-huggingface==1.2.0
 sentence-transformers==5.2.3
+
+pandas
+openpyxl
+
+python-multipart

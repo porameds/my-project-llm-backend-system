@@ -40,7 +40,6 @@ app = FastAPI(title="Company Super Agent API")
 #  Mount Static Files (จุดที่ใช้แสดงรูป)
 app.mount("/static", StaticFiles(directory="/home/smf-llm-ai/llm_backend_system/my_llm_backend_system/marker_env"), name="static")
 
-# Endpoint สำหรับตรวจสอบไฟล์แบบเจาะลึก (เป็นเหมือน File Explorer)
 @app.get("/check-static")
 @app.get("/check-static/{subpath:path}")
 async def check_static_files(subpath: str = ""):
