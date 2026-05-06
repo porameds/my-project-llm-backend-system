@@ -32,7 +32,7 @@ def ingest_csv_to_sql(csv_file_path, table_name):
 
 if __name__ == "__main__":
     # ชื่อไฟล์ CSV ที่เราเตรียมไว้
-    CSV_FILE = "/home/smf-llm-ai/llm_backend_system/my_llm_backend_system/smart_machine_oee_20251207.csv" 
+    CSV_FILE = "/home/smf-llm-ai/llm_backend_system/my_llm_backend_system/smart_machine_oee_20251209.csv" 
     
     # ตั้งชื่อตารางที่ต้องการให้ไปโผล่ใน PostgreSQL
     TABLE_NAME = "machine_logs" 

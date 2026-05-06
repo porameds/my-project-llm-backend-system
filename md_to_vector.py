@@ -1,29 +1,29 @@
 import os
-import re  # 🌟 เพิ่ม import re สำหรับแปลงลิงก์รูปภาพ
+import re
+import time
 from langchain_text_splitters import MarkdownHeaderTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_postgres import PGVector
 from sqlalchemy import create_engine, text
 import urllib.parse
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
 
 # ==========================================
 #  1. ตั้งค่า Database และ Collection
 # ==========================================
-# 📍 1.1 DB สำหรับเก็บ Vector (Local Server)
 VECTOR_CONNECTION_STRING = "postgresql+psycopg2://postgres:User%40FujikuraN1@localhost/llm_db"
 COLLECTION_NAME = "all_company_docs"
 
-# 📍 1.2 DB สำหรับเก็บตาราง Tracking (Server อื่น)
-# เปลี่ยนชื่อ Database ด้านหลังสุดเป็น /ai
 TRACKING_CONNECTION_STRING = "postgresql+psycopg2://postgres:8XFvLYV77O7upme@10.17.32.144:5432/ai"
 
 BASE_STATIC_URL = "http://10.17.41.116:8000/static" 
 
 def ingest_md_to_vector(md_path, department_name):
-    print(f"\n [เริ่ม] นำเข้าไฟล์: {os.path.basename(md_path)} (แผนก: {department_name})")
+    print(f"\n[เริ่ม] นำเข้าไฟล์: {os.path.basename(md_path)} (แผนก: {department_name})")
     
     if not os.path.exists(md_path):
-        print(f" ไม่พบไฟล์ {md_path} ระบบจะข้ามไฟล์นี้ไป")
+        print(f" ไม่พบไฟล์ {md_path} ข้ามไฟล์นี้ไป")
         return False
 
     file_name = os.path.basename(md_path)
@@ -34,23 +34,20 @@ def ingest_md_to_vector(md_path, department_name):
     # ==========================================
     #  1.5 แปลง Path รูปภาพให้เป็น URL เต็ม (แบบปลอดภัยกับ Markdown)
     # ==========================================
-    print(" 🔍 กำลังแปลงลิงก์รูปภาพให้อ้างอิงไปยัง FastAPI Static...")
+    print("  กำลังแปลงลิงก์รูปภาพให้อ้างอิงไปยัง FastAPI Static...")
     
-    # 1. ดึงชื่อโฟลเดอร์ และแปลงช่องว่าง/ภาษาไทย ให้เป็นรหัส URL ปลอดภัย (เช่น %20)
     folder_name = file_name.replace('.md', '') 
     safe_folder_name = urllib.parse.quote(folder_name)
     
-    # 2. ฟังก์ชันย่อยสำหรับแทนที่ลิงก์ทีละตัว
     def replace_url(match):
         alt_text = match.group(1)
-        img_file = match.group(2)
-        safe_img_file = urllib.parse.quote(img_file) # เข้ารหัสชื่อไฟล์รูปเผื่อมีช่องว่างด้วย
+        raw_img_path = match.group(2)
         
-        # ⚠️ หมายเหตุ: โค้ดนี้สมมติว่ารูปภาพของคุณอยู่ในโฟลเดอร์ย่อย (เช่น marker_env/KC11.../ภาพ.jpeg)
-        # ถ้าภาพของคุณกองรวมอยู่ข้างนอกโฟลเดอร์ย่อย ให้ลบ /{safe_folder_name} ออกจากบรรทัดด้านล่าง
-        new_url = f"{BASE_STATIC_URL}/{safe_folder_name}/{safe_img_file}"
+        img_file_name = os.path.basename(raw_img_path)
+        safe_img_file = urllib.parse.quote(img_file_name)
+        new_url = f"{BASE_STATIC_URL}/folder_for_img_path_url/{safe_folder_name}/{safe_img_file}"
         
-        print(f"    🖼️ แปลงแล้ว: {new_url}")
+        print(f"     แปลงแล้ว: {new_url}")
         return f"![{alt_text}]({new_url})"
 
     markdown_text = re.sub(
@@ -67,7 +64,7 @@ def ingest_md_to_vector(md_path, department_name):
     markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on, strip_headers=False)
     
     chunks = markdown_splitter.split_text(markdown_text)
-    print(f" ✂️ สับเอกสารได้: {len(chunks)} ชิ้น")
+    print(f"  สับเอกสารได้: {len(chunks)} ชิ้น")
 
     for chunk in chunks:
         chunk.metadata["department"] = department_name
@@ -83,7 +80,7 @@ def ingest_md_to_vector(md_path, department_name):
             header_context = " > ".join(parent_headers)
             chunk.page_content = f"[หัวข้ออ้างอิง: {header_context}]\n{chunk.page_content}"
 
-    print(" 🧠 กำลังฝังข้อมูล (Embedding) และบันทึกลง Vector Database...")
+    print("  กำลังฝังข้อมูล (Embedding) และบันทึกลง Vector Database...")
     embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
     vector_engine = create_engine(VECTOR_CONNECTION_STRING)
     
@@ -96,7 +93,7 @@ def ingest_md_to_vector(md_path, department_name):
     
     vector_store.add_documents(chunks)
     
-    print(" 📝 กำลังอัปเดตข้อมูลไฟล์ลงตารางติดตาม...")
+    print("  กำลังอัปเดตข้อมูลไฟล์ลงตารางติดตาม...")
     tracking_engine = create_engine(TRACKING_CONNECTION_STRING)
     
     create_table_query = text("""
@@ -120,73 +117,64 @@ def ingest_md_to_vector(md_path, department_name):
         conn.execute(create_table_query)
         conn.execute(insert_query, {"file_name": file_name, "department": department_name})
         
-    print(f" 🎉 [สำเร็จ] นำเข้า {file_name} ลงระบบเรียบร้อย!")
+    print(f" [สำเร็จ] นำเข้า {file_name} ลงระบบเรียบร้อย!")
     return True
 
+
 # ==========================================
-#  2. จุดเริ่มต้นการทำงาน (Main Execution)
+#  2. สร้าง Event Handler สำหรับดักจับไฟล์
+# ==========================================
+class MdHandler(FileSystemEventHandler):
+    def __init__(self, department_name):
+        self.department_name = department_name
+
+    def process_file(self, file_path):
+        # กรองให้ทำงานเฉพาะกับไฟล์ .md เท่านั้น
+        if file_path.endswith('.md'):
+            # หน่วงเวลา 1 วินาที ให้ OS บันทึกไฟล์เสร็จสมบูรณ์ก่อนอ่าน
+            time.sleep(1)
+            ingest_md_to_vector(file_path, self.department_name)
+
+    def on_created(self, event):
+        if not event.is_directory:
+            self.process_file(event.src_path)
+
+    def on_moved(self, event):
+        if not event.is_directory:
+            self.process_file(event.dest_path)
+
+
+# ==========================================
+#  3. Main Execution (จุดรันโปรแกรม)
 # ==========================================
 if __name__ == "__main__":
-    print("=" * 60)
-    print(" ระบบนำเข้าเอกสารลง Vector Database (แยกตามแผนก)")
-    print("=" * 60)
+    # ระบุโฟลเดอร์ที่ต้องการเฝ้าดูไฟล์ Markdown 
+    WATCH_FOLDER = "/home/smf-llm-ai/llm_backend_system/my_llm_backend_system/marker_env/QA_FACA_md"
+    
+    # ระบุแผนก
+    DEPARTMENT_NAME = "QA_FACA"
 
-    files_to_ingest = [
-        {
-            "path": "/home/smf-llm-ai/llm_backend_system/my_llm_backend_system/marker_env/KC10 Turtle Diagram.md", 
-            "dept": "Training_KC"
-        },
-        {
-            "path": "/home/smf-llm-ai/llm_backend_system/my_llm_backend_system/marker_env/KC11_ตัวอย่างการตอบ CAR.md", 
-            "dept": "Training_KC"
-        },
-         {
-            "path": "/home/smf-llm-ai/llm_backend_system/my_llm_backend_system/marker_env/KC17_Cost down by VE.md", 
-            "dept": "Training_KC"
-        },
-          {
-            "path": "/home/smf-llm-ai/llm_backend_system/my_llm_backend_system/marker_env/KC20_Teamwork and Collaboration.md", 
-            "dept": "Training_KC"
-        },
-          {
-            "path": "/home/smf-llm-ai/llm_backend_system/my_llm_backend_system/marker_env/KC24_10 Steps for SGA.md", 
-            "dept": "Training_KC"
-        },
-          {
-            "path": "/home/smf-llm-ai/llm_backend_system/my_llm_backend_system/marker_env/KC26_5 Why Analysis.md", 
-            "dept": "Training_KC"
-        },
-            {
-            "path": "/home/smf-llm-ai/llm_backend_system/my_llm_backend_system/marker_env/KC09 APQP.md", 
-            "dept": "Training_KC"
-        },
-            {
-            "path": "/home/smf-llm-ai/llm_backend_system/my_llm_backend_system/marker_env/KC08_CAPA Corrective and Preventive Action (แนวทางการแก้ไขป้องกัน).md", 
-            "dept": "Training_KC"
-        },
-            {
-            "path": "/home/smf-llm-ai/llm_backend_system/my_llm_backend_system/marker_env/KC07_8D_Report.md", 
-            "dept": "Training_KC"
-        },
-    ]
-    success_count = 0
-    fail_count = 0
+    # ตรวจสอบและสร้างโฟลเดอร์หากยังไม่มี
+    if not os.path.exists(WATCH_FOLDER):
+        os.makedirs(WATCH_FOLDER)
 
-    for item in files_to_ingest:
-        try:
-            result = ingest_md_to_vector(item["path"], department_name=item["dept"])
-            if result:
-                success_count += 1
-            else:
-                fail_count += 1
-        except Exception as e:
-            print(f" [Error] เกิดข้อผิดพลาดกับไฟล์ {item['path']}: {str(e)}")
-            fail_count += 1 
+    # ตั้งค่า Observer ของ watchdog
+    event_handler = MdHandler(department_name=DEPARTMENT_NAME)
+    observer = Observer()
+    observer.schedule(event_handler, WATCH_FOLDER, recursive=False)
 
-    print("\n" + "=" * 60)
-    print(f" กระบวนการเสร็จสิ้น! (สำเร็จ: {success_count} ไฟล์ | ล้มเหลว/ข้าม: {fail_count} ไฟล์)")
-    print("=" * 60)
-
+    print(f" เริ่มเฝ้าดูการเปลี่ยนแปลงในโฟลเดอร์: {WATCH_FOLDER}")
+    print("กำลังรอไฟล์ Markdown (.md) ใหม่... (กด Ctrl+C เพื่อหยุดการทำงาน)")
+    
+    observer.start()
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        observer.stop()
+        print("\nหยุดการทำงานเรียบร้อยแล้ว")
+    
+    observer.join()
 
 # import os
 # from langchain_text_splitters import MarkdownHeaderTextSplitter

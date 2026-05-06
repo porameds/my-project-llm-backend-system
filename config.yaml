@@ -13,6 +13,8 @@ model_list:
     litellm_params:
       model: ollama/llama3.1:8b
       api_base: http://localhost:11434
+      max_tokens: 8000
+      num_ctx: 16384
 
   - model_name: qwen-3
     litellm_params:

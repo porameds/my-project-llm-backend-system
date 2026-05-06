@@ -9,9 +9,9 @@ import re
 # ==========================================
 #  1. ตั้งค่าไฟล์และโฟลเดอร์
 # ==========================================
-PDF_FILE = "/home/smf-llm-ai/llm_backend_system/my_llm_backend_system/marker_env/KC11_ตัวอย่างการตอบ CAR  (หา Root Cause ทำ Corrective Action).pdf"
+PDF_FILE = "/home/smf-llm-ai/llm_backend_system/my_llm_backend_system/marker_env/KC17_Cost down by VE (การลดต้นทุนด้วยเทคนิค วิศวกรรมคุณค่า).pdf"
 MARKER_OUT_DIR = "/home/smf-llm-ai/llm_backend_system/my_llm_backend_system/marker_env/Marker_Output"
-FINAL_MD_FILE = "KC11_ตัวอย่างการตอบ CAR.md" # ชื่อไฟล์ผลลัพธ์สุดท้ายที่คลีนแล้ว
+FINAL_MD_FILE = "KC17_Cost down by VE.md" # ชื่อไฟล์ผลลัพธ์สุดท้ายที่คลีนแล้ว
 
 # ==========================================
 #  2. ตั้งค่า LLM (LiteLLM / Ollama)
@@ -136,23 +136,23 @@ if __name__ == "__main__":
         # 1. รัน Marker แปลง PDF -> MD
         run_marker()
         
-        # # 2. หาไฟล์ .md
-        # raw_md_path = find_generated_md()
-        # print(f"\nเจอไฟล์ Markdown ต้นฉบับที่: {raw_md_path}")
+        # 2. หาไฟล์ .md
+        raw_md_path = find_generated_md()
+        print(f"\nเจอไฟล์ Markdown ต้นฉบับที่: {raw_md_path}")
         
-        # with open(raw_md_path, "r", encoding="utf-8") as f:
-        #     raw_text = f.read()
+        with open(raw_md_path, "r", encoding="utf-8") as f:
+            raw_text = f.read()
             
-        # # 3. ตรวจสอบและคลีนภาษาไทย
-        # if is_thai_document(raw_text):
-        #     perfect_text = clean_thai_text_with_llm(raw_text)
-        # else:
-        #     print(f"\n[Step 2] ข้ามการใช้ LLM เนื่องจากเอกสารส่วนใหญ่เป็นภาษาอังกฤษ")
-        #     perfect_text = raw_text 
+        # 3. ตรวจสอบและคลีนภาษาไทย
+        if is_thai_document(raw_text):
+            perfect_text = clean_thai_text_with_llm(raw_text)
+        else:
+            print(f"\n[Step 2] ข้ามการใช้ LLM เนื่องจากเอกสารส่วนใหญ่เป็นภาษาอังกฤษ")
+            perfect_text = raw_text 
         
-        # # 4. เซฟเป็นไฟล์ใหม่
-        # with open(FINAL_MD_FILE, "w", encoding="utf-8") as f:
-        #     f.write(perfect_text)
+        # 4. เซฟเป็นไฟล์ใหม่
+        with open(FINAL_MD_FILE, "w", encoding="utf-8") as f:
+            f.write(perfect_text)
             
         print(f"\n [เสร็จสมบูรณ์] ใช้เวลาไปทั้งหมด {time.time() - start_time:.2f} วินาที")
         print(f" บันทึกไฟล์ที่คลีนแล้วชื่อ: '{FINAL_MD_FILE}'")

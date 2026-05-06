@@ -1,16 +1,20 @@
 from venv import logger
 
 import uvicorn
+import pandas as pd
 import uuid
 import json
 import os
+import re
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-
+from fastapi.staticfiles import StaticFiles 
+from api_img_list_for_user_delete import router as image_router
+from api_img_list_for_user_delete import router as pdfs_router
+from QA_api_upload import router as qa_faca
 # ==========================================
 #  1. Imports ทั้งหมดที่จำเป็น
 # ==========================================
@@ -24,6 +28,7 @@ from langchain_community.utilities import SQLDatabase
 from langchain_community.agent_toolkits import create_sql_agent
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.prompts import PromptTemplate
 
 # ==========================================
 #  2. ตั้งค่าการเชื่อมต่อ (Configurations)
@@ -31,22 +36,44 @@ from langchain_core.messages import SystemMessage, HumanMessage
 CONNECTION_STRING = "postgresql+psycopg2://postgres:User%40FujikuraN1@host.docker.internal/llm_db"
 COLLECTION_NAME = "all_company_docs"
 
-LLM_MODEL_NAME = "llama-3"
-LLM_API_KEY = "sk-hXu_Q9kM5BWMeMVbrpYsdg" 
+LLM_MODEL_NAME = "qwen-3"
+LLM_API_KEY = "sk-laW9Aq8Xv3MH85OSRZHhMQ"
+# LLM_MODEL_NAME = "llama-3"
+# LLM_API_KEY = "sk-hXu_Q9kM5BWMeMVbrpYsdg" 
 LLM_BASE_URL = "http://host.docker.internal:4000/v1"
 
-app = FastAPI(title="Company Super Agent API")
+app = FastAPI(
+    title="Company Super Agent API",
+    docs_url="/docs",        
+    redoc_url="/redoc",     
+    openapi_url="/openapi.json"  # บังคับสร้างไฟล์ Schema
+)
 
-#  Mount Static Files (จุดที่ใช้แสดงรูป)
-app.mount("/static", StaticFiles(directory="/home/smf-llm-ai/llm_backend_system/my_llm_backend_system/marker_env"), name="static")
+#  Mount Static Files 
+
+# 1. ให้เช็ค Path ที่เจาะจงก่อน (/static/pdfs) และชี้ไปที่โฟลเดอร์ QA_FACA_pdf
+app.mount(
+    "/static/pdfs", 
+    StaticFiles(directory="/home/smf-llm-ai/llm_backend_system/my_llm_backend_system/marker_env/QA_FACA_pdf"), 
+    name="pdfs"
+)
+
+# 2. สำหรับไฟล์อื่นๆ
+app.mount(
+    "/static", 
+    StaticFiles(directory="/home/smf-llm-ai/llm_backend_system/my_llm_backend_system/marker_env"), 
+    name="static"
+)
+
+# Endpoint สำหรับตรวจสอบไฟล์
 
 @app.get("/check-static")
 @app.get("/check-static/{subpath:path}")
 async def check_static_files(subpath: str = ""):
-    base_dir = "/home/smf-llm-ai/llm_backend_system/my_llm_backend_system/marker_env"
-    
+    # base_dir = "/home/smf-llm-ai/llm_backend_system/my_llm_backend_system/marker_env/folder_for_img_path_url"
+    base_pdf_dir = "/home/smf-llm-ai/llm_backend_system/my_llm_backend_system/marker_env/QA_FACA_pdf"
     # รวม Path ที่ต้องการดู
-    target_path = os.path.join(base_dir, subpath) if subpath else base_dir
+    target_path = os.path.join(base_pdf_dir, subpath) if subpath else base_pdf_dir
     
     if not os.path.exists(target_path):
         return {"status": "error", "message": f"ไม่พบ Path นี้ในมุมมองของ Docker: {target_path}"}
@@ -74,9 +101,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
+app.include_router(image_router)
+app.include_router(pdfs_router)
+app.include_router(qa_faca)
 # สร้าง Engine สำหรับต่อ Database ทั่วไป
-engine = create_engine(CONNECTION_STRING)
+engine = create_engine(CONNECTION_STRING, pool_pre_ping=True, pool_recycle=300)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -108,31 +137,74 @@ vector_store = PGVector(
 )
 
 print(" กำลังเชื่อมต่อ LLM...")
-llm = ChatOpenAI(model=LLM_MODEL_NAME, api_key=LLM_API_KEY, base_url=LLM_BASE_URL, temperature=0,max_tokens=8000 )
+llm = ChatOpenAI(
+    model=LLM_MODEL_NAME, 
+    api_key=LLM_API_KEY, 
+    base_url=LLM_BASE_URL, 
+    temperature=0.1, 
+    max_tokens=8000, 
+    model_kwargs={
+        "stop": ["Observation:", "\nObservation:", "Observation"],
+        # "presence_penalty": 1.0,   # ปรับเพิ่มเป็น 1.0 เพื่อให้ AI พยายามพูดเรื่องใหม่ๆ
+        # "frequency_penalty": 1.0   # ใช้ตัวนี้แทน repetition_penalty เพื่อป้องกันการพิมพ์คำเดิมซ้ำๆ
+    }
+)
 
 print(" กำลังเชื่อมต่อ SQL Database และสร้าง SQL Agent...")
 db = SQLDatabase.from_uri(CONNECTION_STRING, include_tables=["machine_logs"])
-sql_agent = create_sql_agent(llm=llm, db=db, agent_type="zero-shot-react-description", verbose=True)
 
-# ==========================================
-#  5. โครงสร้างข้อมูล Pydantic
-# ==========================================
-# ==========================================
-#  5. โครงสร้างข้อมูล Pydantic
-# ==========================================
-class StructuredChatResponse(BaseModel):
-    answer: str = Field(description="คำตอบที่ละเอียดและครอบคลุม (ตอบภาษาไทยเท่านั้น ห้ามตอบภาษาจีน)")
-    image_links: List[str] = Field(description="รายการ URL ของรูปภาพทั้งหมดที่พบในข้อมูลอ้างอิง ให้ดึงมาเฉพาะลิงก์ HTTP ข้างในวงเล็บ () เท่านั้น หากไม่มีให้ปล่อยว่าง", default=[])
-    sentiment: str = Field(description="อารมณ์ของประโยคคำถาม (Positive, Negative, Neutral)")
-    confidence_score: float = Field(description="ความมั่นใจในคำตอบ 0.0 - 1.0")
+PREFIX = """คุณคือ AI ผู้เชี่ยวชาญด้านฐานข้อมูลโรงงาน จงทำงานตามรูปแบบด้านล่างนี้อย่างเคร่งครัด
+ห้ามกล่าวทักทาย ห้ามอธิบายตัวเอง ห้ามขอโทษ และ ห้ามแต่งข้อมูลขึ้นมาเองเด็ดขาด
 
-structured_llm = llm.with_structured_output(StructuredChatResponse)
+รูปแบบการทำงานที่บังคับใช้:
+Thought: (คิดว่าต้องทำอะไร)
+Action: (เลือกเครื่องมือ: sql_db_list_tables, sql_db_schema, หรือ sql_db_query)
+Action Input: (คำสั่ง SQL หรือข้อมูลที่ต้องใส่ พิมพ์ในบรรทัดเดียวกัน ห้ามขึ้นบรรทัดใหม่)
 
-structured_llm = llm.with_structured_output(StructuredChatResponse)
+--- ตัวอย่างการทำงานที่ถูกต้อง ---
+Thought: ฉันต้องคิวรี่ข้อมูลเครื่อง X-64-110 ของวันที่ 7
+Action: sql_db_query
+Action Input: SELECT * FROM machine_logs WHERE mc_code = 'X-64-110' AND date_time LIKE '%-07 %'
+-------------------------
+
+ข้อตกลงสำคัญ (CRITICAL RULES):
+1.  ทันทีที่คุณพิมพ์ Action Input เสร็จ คุณต้อง "หยุดพิมพ์ทันที" ห้ามพิมพ์คำว่า Observation หรือ Thought ต่อท้ายขึ้นมาเองเด็ดขาด!
+2.  ห้ามคัดลอกวันที่จากข้อมูลตัวอย่าง (Sample rows) มาเขียนคำสั่ง SQL ให้ใช้วันที่จาก "คำถามของผู้ใช้" เท่านั้น
+"""
+
+sql_agent = create_sql_agent(
+    llm=llm, 
+    db=db, 
+    agent_type="zero-shot-react-description", 
+    verbose=True,
+    handle_parsing_errors=True, # ช่วยจัดการกรณีที่ Agent คายรูปแบบคำตอบผิด
+    agent_executor_kwargs={"handle_parsing_errors": True},
+    prefix=PREFIX,
+    max_iterations=5,
+    top_k=10
+    )
+
+
+# # ==========================================
+# #  5. โครงสร้างข้อมูล Pydantic
+# # ==========================================
+# class StructuredChatResponse(BaseModel):
+#     answer: str = Field(description="คำตอบที่ละเอียดและครอบคลุม (ตอบภาษาไทยเท่านั้น ห้ามตอบภาษาจีน)")
+#     image_links: List[str] = Field(description="รายการ URL ของรูปภาพทั้งหมดที่พบในข้อมูลอ้างอิง ให้ดึงมาเฉพาะลิงก์ HTTP ข้างในวงเล็บ () เท่านั้น หากไม่มีให้ปล่อยว่าง", default=[])
+#     sentiment: str = Field(description="อารมณ์ของประโยคคำถาม (Positive, Negative, Neutral)")
+#     confidence_score: float = Field(description="ความมั่นใจในคำตอบ 0.0 - 1.0")
+
+# structured_llm = llm.with_structured_output(StructuredChatResponse)
 
 class ChatRequest(BaseModel):
     query: str
     department: Optional[str] = None
+
+class QueryFilterSchema(BaseModel):
+    product: Optional[str] = Field(
+        description="ชื่อรุ่นสินค้าภาษาอังกฤษ ตัวเลข เครื่องหมาย - และ _ (เช่น RGPZ-542ML-1B_test) ห้ามดึงคำศัพท์ภาษาไทย หากไม่มีให้คืนค่า null",
+        default=None
+        )
 
 # ==========================================
 #  6. Endpoint หลัก (Super Agent API)
@@ -152,7 +224,7 @@ async def chat_with_company_bot(request: ChatRequest):
         ).first()
 
         if cached_record:
-            # logger.info(f"\n [CACHE HIT] โหลดจาก Cache ข้ามการค้นหาใหม่ -> คำถาม: '{request.query}'", flush=True)
+            logger.info(f"\n [CACHE HIT] โหลดจาก Cache ข้ามการค้นหาใหม่ -> คำถาม: '{request.query}'", flush=True)
             return json.loads(cached_record.output_model)
 
         target_db = "SQL_DB" if request.department == "dataInsights" else "VECTOR_DB"
@@ -173,12 +245,46 @@ async def chat_with_company_bot(request: ChatRequest):
 
         else:
             # logger.info(f"[ROUTE] วิ่งเข้า Vector Database (เอกสารความรู้)", flush=True)
-            search_kwargs = {"k": 5}
+
+            # ---------------------------------------------------------
+            # ขั้นตอนที่ 1: Self-Querying (สกัด Metadata จากคำถาม)
+            # ---------------------------------------------------------
+            search_kwargs = {"k": 10, "filter": {}}
+
             if request.department and request.department != "dataInsights":
                 search_kwargs["filter"] = {"department": request.department}
-                
-            results = vector_store.similarity_search_with_score(request.query, **search_kwargs)
             
+            extractor_llm = llm.with_structured_output(QueryFilterSchema)
+            try:
+                strict_prompt = f"""
+                จงสกัดหา 'ชื่อรุ่นสินค้า (Product Name)' หรือ 'รหัสสินค้า (APN)' จากประโยคคำถามนี้: '{request.query}'
+                
+                กฎสำคัญขั้นเด็ดขาด (CRITICAL RULES):
+                1. ดึงชื่อรุ่นสินค้ามาให้ครบทุกตัวอักษร "ห้ามตัดทอนข้อความเด็ดขาด!"
+                   - ตัวอย่าง: ถ้าผู้ใช้พิมพ์ "RGPZ-542ML-1B_test" คุณต้องดึงมาเป็น "RGPZ-542ML-1B_test" (ห้ามตัดเหลือแค่ RGPZ-542ML-1B)
+                2. ชื่อรุ่นสินค้าต้องเป็นภาษาอังกฤษ ตัวเลข หรือมีเครื่องหมายขีด (-) หรือ (_) เท่านั้น
+                3. ห้ามดึงคำที่เป็นภาษาไทยทั่วไปเด็ดขาด เช่น 'ข้อมูล', 'รายงาน', 'ปัญหา', 'สาเหตุ', 'ขอ'
+                4. หากไม่พบชื่อรุ่นสินค้าที่ชัดเจน ให้คืนค่า null เท่านั้น
+                """
+                extracted_meta = extractor_llm.invoke(strict_prompt)
+                # ถ้า AI เจอชื่อ Product ในคำถาม ให้เพิ่มเข้าไปใน Filter ทันที!
+                if extracted_meta.product:
+                    if "ข้อมูล" not in extracted_meta.product:
+                        search_kwargs["filter"]["product"] = extracted_meta.product
+                        logger.info(f"[SELF-QUERY] สกัดชื่อ Product ได้: {extracted_meta.product}", flush=True)
+                    else:
+                        logger.info(f"[SELF-QUERY] AI สกัดคำผิดพลาด (ได้คำว่า {extracted_meta.product}) จึงข้ามการทำ Filter", flush=True)
+            except Exception as e:
+                logger.warning(f"[SELF-QUERY] สกัดข้อมูลล้มเหลว หรือไม่พบ Product ข้ามการทำ Filter Product: {e}")
+            
+            # เคลียร์ filter ที่ว่างเปล่าออก เพื่อไม่ให้ VectorDB error
+            if not search_kwargs["filter"]:
+                del search_kwargs["filter"]
+            # ---------------------------------------------------------
+            # ขั้นตอนที่ 2: ค้นหาข้อมูล (พร้อม Filter อัตโนมัติ)
+            # ---------------------------------------------------------
+            results = vector_store.similarity_search_with_score(request.query, **search_kwargs)
+
             if not results:
                 # logger.info(f" [VECTOR DB] หาไม่เจอ! Vector Store ไม่พบเนื้อหาที่ตรงกับคำถาม", flush=True)
                 final_response_dict = {
@@ -196,40 +302,52 @@ async def chat_with_company_bot(request: ChatRequest):
                     raw_context += f"[{file_name}] {doc.page_content}\n"
                     if file_name not in source_files:
                         source_files.append(file_name)
+                # clean tag url รูปภาพออกจาก raw_context
+                image_urls = re.findall(r'!\[.*?\]\((http[s]?://[^\)]+)\)', raw_context) 
+                unique_image_urls = list(set(image_urls)) # ลบ URL รูปที่ซ้ำกันออก
+                clean_text_context = re.sub(r'!\[.*?\]\((http[s]?://[^\)]+)\)', '', raw_context)
+
+
                 print("\n" + "="*50)
                 print("="*50, flush=True)
                 print(raw_context, flush=True)
                 print("="*50 + "\n", flush=True)
-                system_instruction = f"""คุณคือผู้ช่วยอัจฉริยะโรงงาน จงตอบคำถามโดยอ้างอิงจากข้อมูลต่อไปนี้เท่านั้น
-กฎกติกาขั้นเด็ดขาด (CRITICAL RULES):
-1. ไม่ว่าผู้ใช้จะพิมพ์มาแค่คีย์เวิร์ดสั้นๆ คุณต้อง "อธิบายรายละเอียดทั้งหมด" ที่เกี่ยวข้องให้ครบถ้วน ห้ามตอบกลับแค่ชื่อหัวข้อเด็ดขาด
-2. สำคัญมาก: หากพบแท็กรูปภาพ เช่น ![](http://...) ในข้อมูลอ้างอิง ให้สกัดเฉพาะ URL (http://...) ออกมาใส่ในช่อง image_links แยกไว้ต่างหาก ห้ามเอาไปปนในข้อความ
-3. บังคับสูงสุด: ต้องตอบกลับเป็น "ภาษาไทย" เท่านั้น! ห้ามแปลหรือตอบเป็นภาษาจีน
-4. ดึงข้อมูลมาตอบให้ครบถ้วน 100% โดยเฉพาะส่วนที่เป็นรายการข้อๆ (Bullet points) หรือมีเครื่องหมายขีด (-) 
-5. ห้ามสรุปรวบรัด ห้ามเขียนรวบเป็นย่อหน้าเดียว และห้ามตัดเนื้อหาทิ้งเด็ดขาด 
-6. ต้องตอบกลับโดยรักษารูปแบบข้อๆ ไว้ตามต้นฉบับ
-ข้อมูลอ้างอิง:
-{raw_context}"""
                 
-                messages = [SystemMessage(content=system_instruction), HumanMessage(content=request.query)]
-                response_object = structured_llm.invoke(messages)
+# ใช้คำสั่งเป็นภาษาอังกฤษทั้งหมด เพื่อป้องกันการคิดในหัวเป็นภาษาจีน
+                system_instruction = f"""You are a professional English-to-Thai translator for factory operations. 
+Your ONLY task is to extract relevant information from the context based on the user's query and translate it into Thai.
+
+CRITICAL RULES:
+1. OUTPUT LANGUAGE: Strictly output in Thai language only. ABSOLUTELY NO CHINESE CHARACTERS (禁止输出中文).
+2. DIRECT OUTPUT: Provide ONLY the translated text. Do not add any conversational text, greetings, explanations, or meta-commentary.
+3. NO THINKING PROCESS: Do not output your thinking process or apologize. Just give the final translated text.
+4. FORMATTING: You MUST preserve the exact original formatting, including line breaks, bullet points (1., 2., -), and hierarchy. Each bullet point or sub-item MUST start on a new line. Do not merge them into a single paragraph.
+5. IMAGE URLS: If you see an image tag like ![](http...), ignore it in the text.
+6. TOPIC LISTING ONLY (CRITICAL FORMAT): If the user asks a general question like "มีข้อมูลอะไรบ้าง" or asks for available topics, DO NOT translate the detailed content. You MUST ONLY extract the main headings/topics found in the context. 
+You MUST format the output EXACTLY as a vertical bulleted list, putting each topic on a new line.
+Example format:
+- Information
+- Occurrence
+- Containment Action
+- Root cause analysis
+- Corrective action
+- Preventive action
+
+Context for translation:
+{clean_text_context}"""
                 
-                if hasattr(response_object, 'parsed') and response_object.parsed is not None:
-                    ans = response_object.parsed.answer
-                    img_list = response_object.parsed.image_links # ดึง list รูปภาพ
-                    sent = response_object.parsed.sentiment
-                    conf = response_object.parsed.confidence_score
-                else:
-                    ans = getattr(response_object, 'answer', 'ไม่สามารถเรียบเรียงได้')
-                    img_list = getattr(response_object, 'image_links', [])
-                    sent = getattr(response_object, 'sentiment', 'Neutral')
-                    conf = getattr(response_object, 'confidence_score', 0.0)
+                messages = [
+                    SystemMessage(content=system_instruction), 
+                    HumanMessage(content=f"Query: {request.query}\nPlease translate the relevant information into Thai, keeping the exact original line breaks and formatting.")
+                ]
+                response_object = llm.invoke(messages)
+                answer_text = response_object.content
                 
                 final_response_dict = {
-                    "answer": str(ans),
-                    "images": img_list,
-                    "sentiment": str(sent),
-                    "confidence_score": float(conf),
+                    "answer": answer_text,
+                    "images": unique_image_urls,   
+                    "sentiment": "Neutral",        
+                    "confidence_score": 0.95,      
                     "sources": source_files
                 }
 
@@ -254,262 +372,3 @@ async def chat_with_company_bot(request: ChatRequest):
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
 
-# import uvicorn
-# import uuid
-# import json
-# from datetime import datetime, timedelta
-# from fastapi import FastAPI, HTTPException
-# from pydantic import BaseModel, Field
-# from typing import List, Optional, Dict, Any
-# from fastapi.middleware.cors import CORSMiddleware
-# from fastapi.staticfiles import StaticFiles
-# import os
-# # ==========================================
-# #  1. Imports ทั้งหมดที่จำเป็น
-# # ==========================================
-# # Database & Cache (SQLAlchemy)
-# from sqlalchemy import create_engine, Column, String, Text, DateTime
-# from sqlalchemy.dialects.postgresql import UUID, JSONB
-# from sqlalchemy.orm import declarative_base, sessionmaker
-
-# # Vector DB
-# from langchain_huggingface import HuggingFaceEmbeddings
-# from langchain_postgres import PGVector
-
-# # SQL Agent
-# from langchain_community.utilities import SQLDatabase
-# from langchain_community.agent_toolkits import create_sql_agent
-
-# # LLM
-# from langchain_openai import ChatOpenAI
-# from langchain_core.messages import SystemMessage, HumanMessage
-
-# # ==========================================
-# #  2. ตั้งค่าการเชื่อมต่อ (Configurations)
-# # ==========================================
-# # CONNECTION_STRING = "postgresql+psycopg2://postgres:User%40FujikuraN1@localhost/llm_db"
-# CONNECTION_STRING = "postgresql+psycopg2://postgres:User%40FujikuraN1@host.docker.internal/llm_db"
-# COLLECTION_NAME = "all_company_docs"
-
-# LLM_MODEL_NAME = "qwen-3" 
-# LLM_API_KEY = "sk-hXu_Q9kM5BWMeMVbrpYsdg" 
-# # LLM_BASE_URL = "http://localhost:4000/v1"
-# LLM_BASE_URL = "http://host.docker.internal:4000/v1"
-
-
-
-# app = FastAPI(title="Company Super Agent API")
-
-# app.mount("/static", StaticFiles(directory="/home/smf-llm-ai/llm_backend_system/my_llm_backend_system/marker_env"), name="static")
-
-
-# # 2. เพิ่ม Endpoint สำหรับตรวจสอบไฟล์
-# @app.get("/check-static")
-# async def check_static_files():
-#     # ระบุ Path เดียวกับที่ใส่ใน app.mount ด้านบน
-#     base_dir = "/home/smf-llm-ai/llm_backend_system/my_llm_backend_system/marker_env"
-    
-#     if not os.path.exists(base_dir):
-#         return {"status": "error", "message": f"ไม่พบโฟลเดอร์: {base_dir}"}
-        
-#     # ลองลิสต์รายชื่อโฟลเดอร์ย่อย/ไฟล์ ที่อยู่ข้างในมาดู
-#     items = os.listdir(base_dir)
-#     return {
-#         "status": "success", 
-#         "message": "มองเห็นโฟลเดอร์ Static แล้ว!",
-#         "items_found": items[:10]  # โชว์แค่ 10 อันดับแรกกันรก
-#     }
-
-# app.add_middleware(
-#     CORSMiddleware,
-#     allow_origins=["*"], # อนุญาตทุกโดเมน (ถ้าขึ้นระบบจริงค่อยเปลี่ยนเป็น URL ของเว็บ Frontend)
-#     allow_credentials=True,
-#     allow_methods=["*"], # อนุญาตทุก Method (GET, POST, OPTIONS, ฯลฯ)
-#     allow_headers=["*"], # อนุญาตทุก Header
-# )
-
-
-
-# # สร้าง Engine สำหรับต่อ Database ทั่วไป
-# engine = create_engine(CONNECTION_STRING)
-# SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-# Base = declarative_base()
-
-# # ==========================================
-# #  3. โครงสร้างตาราง Cache ใน PostgreSQL
-# # ==========================================
-# class LlmPromptCache(Base):
-#     __tablename__ = "llm_prompt_cache"
-#     __table_args__ = {"schema": "public"} 
-#     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-#     model = Column(String, index=True)           
-#     input_model = Column(Text, index=True)       
-#     output_model = Column(Text)                  
-#     condition = Column(Text, nullable=True)      
-#     meta_data = Column("meta", JSONB, nullable=True) 
-#     expires_date = Column(DateTime)              
-#     created_at = Column(DateTime, default=datetime.utcnow) 
-
-# # สร้างตาราง Cache ถ้ายังไม่มี
-# print(" กำลังตรวจสอบและสร้างตาราง Cache...")
-# Base.metadata.create_all(bind=engine)
-
-# # ==========================================
-# #  4. โหลด AI และ Tools รอไว้
-# # ==========================================
-# print(" กำลังโหลด Embedding และ Vector Store...")
-# embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
-# vector_store = PGVector(
-#     embeddings=embeddings, collection_name=COLLECTION_NAME, connection=CONNECTION_STRING, use_jsonb=True
-# )
-
-# print(" กำลังเชื่อมต่อ LLM...")
-# llm = ChatOpenAI(model=LLM_MODEL_NAME, api_key=LLM_API_KEY, base_url=LLM_BASE_URL, temperature=0)
-
-# print(" กำลังเชื่อมต่อ SQL Database และสร้าง SQL Agent...")
-# db = SQLDatabase.from_uri(CONNECTION_STRING, include_tables=["machine_logs"])
-# sql_agent = create_sql_agent(llm=llm, db=db, agent_type="zero-shot-react-description", verbose=True)
-
-# # ==========================================
-# #  5. โครงสร้างข้อมูล Pydantic
-# # ==========================================
-# class StructuredChatResponse(BaseModel):
-#     answer: str = Field(description="คำตอบที่ละเอียด ครอบคลุม รักษารูปแบบหัวข้อและ List (ตอบภาษาไทย)")
-#     sentiment: str = Field(description="อารมณ์ของประโยคคำถาม (Positive, Negative, Neutral)")
-#     confidence_score: float = Field(description="ความมั่นใจในคำตอบ 0.0 - 1.0")
-
-# structured_llm = llm.with_structured_output(StructuredChatResponse)
-
-# class ChatRequest(BaseModel):
-#     query: str
-#     department: Optional[str] = None # ถ้าส่งมาเป็น "dataInsights" จะไปเข้า SQL
-
-# # ==========================================
-# #  6. Endpoint หลัก (Super Agent API)
-# # ==========================================
-# @app.post("/api/chat")
-# async def chat_with_company_bot(request: ChatRequest):
-#     db_session = SessionLocal()
-#     try:
-#         now = datetime.utcnow()
-#         print(f"\n [เริ่มทำงาน] คำถาม: '{request.query}' | แผนก/โหมด: '{request.department}'")
-
-#         # กำหนด Condition ของ Cache (เพื่อไม่ให้คำถามเดียวกันแต่คนละแผนกมาปนกัน)
-#         cache_condition = request.department if request.department else "ALL_DEPARTMENTS"
-
-#         # ---  STEP A: ตรวจสอบ Cache ---
-#         cached_record = db_session.query(LlmPromptCache).filter(
-#             LlmPromptCache.input_model == request.query,
-#             LlmPromptCache.condition == cache_condition,
-#             LlmPromptCache.expires_date > now  
-#         ).first()
-
-#         if cached_record:
-#             print(" [Cache Hit] ดึงคำตอบจากความจำเดิม ")
-#             return json.loads(cached_record.output_model)
-
-#         print(" [Cache Miss] ไม่พบในความจำ เริ่มกระบวนการค้นหาและคิดใหม่...")
-
-#         # ---  STEP B: Routing สับราง ---
-#         target_db = "SQL_DB" if request.department == "dataInsights" else "VECTOR_DB"
-#         print(f" ระบบสับรางไปยัง: {target_db}")
-
-#         final_response_dict = {}
-
-#         # ==========================================
-#         #  เส้นทางที่ 1: SQL Agent (Data Insights)
-#         # ==========================================
-#         if target_db == "SQL_DB":
-#             print(" กำลังประมวลผลผ่าน SQL Agent...")
-#             smart_prompt = f"""
-# คำถามจากผู้ใช้: {request.query}
-# """
-#             response = sql_agent.invoke({"input": smart_prompt})
-#             sql_answer = response.get("output", "ไม่สามารถดึงข้อมูลจากระบบฐานข้อมูลได้")
-            
-#             final_response_dict = {
-#                 "answer": sql_answer,
-#                 "sentiment": "Neutral",
-#                 "confidence_score": 0.95,
-#                 "sources": ["SQL Database (Data Insights)"]
-#             }
-
-#         # ==========================================
-#         #  เส้นทางที่ 2: Vector DB (เอกสารทั่วไป)
-#         # ==========================================
-#         else:
-#             print(" กำลังค้นหาในเอกสาร Vector DB...")
-#             search_kwargs = {"k": 10}
-#             if request.department and request.department != "dataInsights":
-#                 search_kwargs["filter"] = {"department": request.department}
-                
-#             results = vector_store.similarity_search_with_score(request.query, **search_kwargs)
-            
-#             if not results:
-#                 final_response_dict = {
-#                     "answer": f"ขออภัย ไม่พบข้อมูลที่เกี่ยวข้องกับคำถามในเอกสาร",
-#                     "sentiment": "Neutral",
-#                     "confidence_score": 0.0,
-#                     "sources": []
-#                 }
-#             else:
-#                 raw_context = ""
-#                 print(f"\n--- [DEBUG SCORE สำหรับคำถาม: {request.query}] ---")
-#                 source_files = []
-#                 for doc, score in results:
-#                     file_name = doc.metadata.get("source_file", "ไม่ระบุไฟล์")
-#                     raw_context += f"[{file_name}] {doc.page_content}\n"
-#                     if file_name not in source_files:
-#                         source_files.append(file_name)
-#                 print(f"\n🔍 [DEBUG] ข้อมูลเบื้องหลังที่ AI ได้รับ:\n{raw_context}\n{'-'*50}")
-#                 system_instruction = f"""คุณคือผู้ช่วยอัจฉริยะโรงงาน จงตอบคำถามโดยอ้างอิงจากข้อมูลต่อไปนี้เท่านั้น
-# กฎกติกาขั้นเด็ดขาด:
-# 1. ดึงข้อมูลมาตอบให้ครบถ้วน 100% โดยเฉพาะส่วนที่เป็นรายการข้อๆ (Bullet points) หรือมีเครื่องหมายขีด (-) 
-# 2. ห้ามสรุปรวบรัด ห้ามเขียนรวบเป็นย่อหน้าเดียว และห้ามตัดเนื้อหาทิ้งเด็ดขาด 
-# 3. ต้องตอบกลับโดยรักษารูปแบบข้อๆ ไว้ตามต้นฉบับ
-
-# ข้อมูลอ้างอิง:
-# {raw_context}"""
-                
-#                 messages = [SystemMessage(content=system_instruction), HumanMessage(content=request.query)]
-#                 response_object = structured_llm.invoke(messages)
-                
-#                 if hasattr(response_object, 'parsed') and response_object.parsed is not None:
-#                     ans = response_object.parsed.answer
-#                     sent = response_object.parsed.sentiment
-#                     conf = response_object.parsed.confidence_score
-#                 else:
-#                     ans = getattr(response_object, 'answer', 'ไม่สามารถเรียบเรียงได้')
-#                     sent = getattr(response_object, 'sentiment', 'Neutral')
-#                     conf = getattr(response_object, 'confidence_score', 0.0)
-                
-#                 final_response_dict = {
-#                     "answer": str(ans),
-#                     "sentiment": str(sent),
-#                     "confidence_score": float(conf),
-#                     "sources": source_files
-#                 }
-
-#         # ---  STEP C: บันทึกความจำลง Cache ก่อนตอบกลับ ---
-#         print(" กำลังบันทึกคำตอบลง Cache...")
-#         new_cache = LlmPromptCache(
-#             model=LLM_MODEL_NAME,
-#             input_model=request.query,
-#             output_model=json.dumps(final_response_dict, ensure_ascii=False), 
-#             condition=cache_condition,
-#             meta_data={"department_requested": request.department, "routed_to": target_db},
-#             expires_date=now + timedelta(days=7) 
-#         )
-#         db_session.add(new_cache)
-#         db_session.commit() 
-
-#         return final_response_dict
-
-#     except Exception as e:
-#         print(f" Error: {str(e)}")
-#         raise HTTPException(status_code=500, detail=str(e))
-#     finally:
-#         db_session.close() # ปิด Session ทุกครั้งเพื่อคืน Connection ให้ Database
-
-# if __name__ == "__main__":
-#     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
