@@ -5,7 +5,9 @@ import urllib.parse
 import pandas as pd
 from typing import List
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks
-
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy import text
 # Langchain & Vector DB
 from langchain_text_splitters import MarkdownHeaderTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -71,7 +73,7 @@ def process_excel_to_single_markdown(excel_filepath: str, output_directory: str)
             all_md_content += md_content
             
         base_excel_name = os.path.basename(excel_filepath).replace(".xlsx", "").replace(".xls", "")
-        safe_filename = "".join([c for c in base_excel_name if c.isalnum() or c=='_']).rstrip()
+        safe_filename = "".join([c for c in base_excel_name if c.isalnum() or c in "-_()"]).rstrip()
         final_filename = f"{safe_filename}.md"
         filepath = os.path.join(output_directory, final_filename)
         
@@ -120,15 +122,20 @@ def ingest_md_to_vector(md_path: str, department_name: str) -> bool:
     print(f"  สับเอกสารได้ทั้งหมด: {len(chunks)} ชิ้น (จาก {file_name})")
 
     topic_product_map = {}
+    topic_apn_map = {}
 
     for chunk in chunks:
         h1 = chunk.metadata.get("Header 1")
         h2 = chunk.metadata.get("Header 2")
 
         if h1 and h2 == "Information":
-            match = re.search(r'Product\s*:\s*([^\n\r]+)', chunk.page_content, re.IGNORECASE)
-            if match:
-                topic_product_map[h1] = match.group(1).strip()
+            match_product = re.search(r'Product\s*:\s*([^\n\r]+)', chunk.page_content, re.IGNORECASE)
+            if match_product:
+                topic_product_map[h1] = match_product.group(1).strip()
+
+            match_apn = re.search(r'APN\s*:\s*([^\n\r]+)', chunk.page_content, re.IGNORECASE)
+            if match_apn:
+                topic_apn_map[h1] = match_apn.group(1).strip()
 
     for chunk in chunks:
         chunk.metadata["department"] = department_name
@@ -136,9 +143,12 @@ def ingest_md_to_vector(md_path: str, department_name: str) -> bool:
 
         h1 = chunk.metadata.get("Header 1")
         product_name = topic_product_map.get(h1, "ไม่ระบุรุ่น")
-        
+        apn_code = topic_apn_map.get(h1, "ไม่ระบุ APN")
+
         if product_name != "ไม่ระบุรุ่น":
             chunk.metadata["product"] = product_name
+        if apn_code != "ไม่ระบุ APN":
+            chunk.metadata["apn"] = apn_code
 
         parent_headers = []
         if "Header 1" in chunk.metadata: parent_headers.append(chunk.metadata["Header 1"])
@@ -146,7 +156,7 @@ def ingest_md_to_vector(md_path: str, department_name: str) -> bool:
             
         if parent_headers:
             header_context = " > ".join(parent_headers)
-            chunk.page_content = f"[รุ่นสินค้า: {product_name} | หัวข้ออ้างอิง: {header_context}]\n{chunk.page_content}"
+            chunk.page_content = f"[รุ่นสินค้า: {product_name} (APN: {apn_code}) | หัวข้ออ้างอิง: {header_context}]\n{chunk.page_content}"
 
     embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
     vector_engine = create_engine(VECTOR_CONNECTION_STRING)
@@ -216,6 +226,18 @@ def update_is_check_status(original_filename: str, safe_filename: str):
     except Exception as e:
         print(f" เกิดข้อผิดพลาดในการอัปเดต is_check: {e}")
 
+def clear_department_cache(department_name: str):
+    """ฟังก์ชันสำหรับล้าง Cache เฉพาะแผนก โดยใช้ Raw SQL"""
+    try:
+        engine = create_engine(VECTOR_CONNECTION_STRING)
+        with engine.connect() as conn:
+            # ใช้คำสั่ง SQL DELETE ตรงๆ ไปที่ตาราง llm_prompt_cache
+            query = text("DELETE FROM public.llm_prompt_cache WHERE condition = :dept")
+            conn.execute(query, {"dept": department_name})
+            conn.commit()
+            print(f"--- [SUCCESS] ล้าง Cache แผนก {department_name} เรียบร้อยแล้ว ---")
+    except Exception as e:
+        print(f"--- [ERROR] ล้าง Cache ไม่สำเร็จ: {e} ---")
 # ==========================================
 #  3. FastAPI Endpoints
 # ==========================================
@@ -294,7 +316,7 @@ async def upload_and_process_file(
                 "status": "failed", 
                 "reason": "Unsupported format"
             })
-
+    background_tasks.add_task(clear_department_cache, department_name)
     # ส่งผลลัพธ์กลับไปให้ Frontend ทราบสถานะของทุกไฟล์
     return {
         "status": "success",
@@ -302,3 +324,4 @@ async def upload_and_process_file(
         "details": upload_results,
         "department": department_name
     }
+    

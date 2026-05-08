@@ -128,6 +128,18 @@ print(" กำลังตรวจสอบและสร้างตารา
 Base.metadata.create_all(bind=engine)
 
 # ==========================================
+# เพิ่มตารางสำหรับเก็บ Suggested Prompts
+# ==========================================
+class SuggestedPrompt(Base):
+    __tablename__ = "suggested_prompts"
+    __table_args__ = {"schema": "public"}
+    id = Column(uuid.UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    department = Column(String, index=True)  # แผนกที่ปุ่มนี้จะไปปรากฎ เช่น QA_FACA
+    prompt_text = Column(Text, nullable=False) # ข้อความบนปุ่ม
+    is_active = Column(DateTime, default=datetime.utcnow) # เอาไว้เปิด/ปิดการใช้งาน (ในที่นี้ใช้ timestamp เช็ค)
+    priority = Column(Integer, default=0) # ลำดับการเรียง (เลขน้อยขึ้นก่อน)
+
+# ==========================================
 #  4. โหลด AI และ Tools รอไว้
 # ==========================================
 print(" กำลังโหลด Embedding และ Vector Store...")
@@ -246,7 +258,7 @@ async def chat_with_company_bot(request: ChatRequest):
         else:
             # logger.info(f"[ROUTE] วิ่งเข้า Vector Database (เอกสารความรู้)", flush=True)
 
-            # ---------------------------------------------------------
+# ---------------------------------------------------------
             # ขั้นตอนที่ 1: Self-Querying (สกัด Metadata จากคำถาม)
             # ---------------------------------------------------------
             search_kwargs = {"k": 10, "filter": {}}
@@ -255,31 +267,52 @@ async def chat_with_company_bot(request: ChatRequest):
                 search_kwargs["filter"] = {"department": request.department}
             
             extractor_llm = llm.with_structured_output(QueryFilterSchema)
+            extracted_product = None # 1. สร้างตัวแปรพักค่า
+            
             try:
+                # ใช้ Prompt แบบยกตัวอย่าง (AI จะเข้าใจและสกัดคำได้แม่นยำกว่า)
                 strict_prompt = f"""
-                จงสกัดหา 'ชื่อรุ่นสินค้า (Product Name)' หรือ 'รหัสสินค้า (APN)' จากประโยคคำถามนี้: '{request.query}'
+                Extract the Product Name or APN from the user's query.
                 
-                กฎสำคัญขั้นเด็ดขาด (CRITICAL RULES):
-                1. ดึงชื่อรุ่นสินค้ามาให้ครบทุกตัวอักษร "ห้ามตัดทอนข้อความเด็ดขาด!"
-                   - ตัวอย่าง: ถ้าผู้ใช้พิมพ์ "RGPZ-542ML-1B_test" คุณต้องดึงมาเป็น "RGPZ-542ML-1B_test" (ห้ามตัดเหลือแค่ RGPZ-542ML-1B)
-                2. ชื่อรุ่นสินค้าต้องเป็นภาษาอังกฤษ ตัวเลข หรือมีเครื่องหมายขีด (-) หรือ (_) เท่านั้น
-                3. ห้ามดึงคำที่เป็นภาษาไทยทั่วไปเด็ดขาด เช่น 'ข้อมูล', 'รายงาน', 'ปัญหา', 'สาเหตุ', 'ขอ'
-                4. หากไม่พบชื่อรุ่นสินค้าที่ชัดเจน ให้คืนค่า null เท่านั้น
+                Examples:
+                - Query: "ขอ detail RGPZ-542ML-1B หน่อย" => Product: "RGPZ-542ML-1B"
+                - Query: "สรุปปัญหา 821-05561-04" => Product: "821-05561-04"
+                - Query: "ขอ detail RGPZ-542ML-1B_test" => Product: "RGPZ-542ML-1B_test"
+                - Query: "ขอรายละเอียดหน่อย" => Product: null
+                - Query: "มีข้อมูลอะไรบ้าง" => Product: null
+                
+                Current Query: "{request.query}"
                 """
                 extracted_meta = extractor_llm.invoke(strict_prompt)
-                # ถ้า AI เจอชื่อ Product ในคำถาม ให้เพิ่มเข้าไปใน Filter ทันที!
-                if extracted_meta.product:
+                
+                # 2. นำค่าที่สกัดได้ มาอัปเดตใส่ตัวแปร extracted_product
+                if extracted_meta and extracted_meta.product:
                     if "ข้อมูล" not in extracted_meta.product:
-                        search_kwargs["filter"]["product"] = extracted_meta.product
-                        logger.info(f"[SELF-QUERY] สกัดชื่อ Product ได้: {extracted_meta.product}", flush=True)
+                        extracted_product = extracted_meta.product
+                        logger.info(f"[SELF-QUERY] สกัดชื่อ Product ได้สำเร็จ: {extracted_product}", flush=True)
                     else:
-                        logger.info(f"[SELF-QUERY] AI สกัดคำผิดพลาด (ได้คำว่า {extracted_meta.product}) จึงข้ามการทำ Filter", flush=True)
+                        logger.info(f"[SELF-QUERY] สกัดได้คำผิด ({extracted_meta.product}) ถือว่าหาไม่เจอ", flush=True)
+
             except Exception as e:
-                logger.warning(f"[SELF-QUERY] สกัดข้อมูลล้มเหลว หรือไม่พบ Product ข้ามการทำ Filter Product: {e}")
+                logger.warning(f"[SELF-QUERY] สกัดข้อมูลล้มเหลว: {e}")
+
+            # 4. ถ้าหา Product เจอ ให้ใส่ไปใน Filter แล้วค้นหาต่อ
+            if extracted_product is not None:
+                search_kwargs["filter"]["product"] = extracted_product
             
             # เคลียร์ filter ที่ว่างเปล่าออก เพื่อไม่ให้ VectorDB error
             if not search_kwargs["filter"]:
                 del search_kwargs["filter"]
+            
+
+            # =======================================
+            # เพิ่ม DEBUG PRINT 
+            print("\n" + "="*50)
+            print(f" [DEBUG] คำถามที่ใช้ค้นหา: '{request.query}'")
+            print(f" [DEBUG] Filter ที่ส่งให้ VectorDB: {search_kwargs}")
+            print("="*50 + "\n", flush=True)
+            # =======================================
+
             # ---------------------------------------------------------
             # ขั้นตอนที่ 2: ค้นหาข้อมูล (พร้อม Filter อัตโนมัติ)
             # ---------------------------------------------------------
@@ -314,31 +347,60 @@ async def chat_with_company_bot(request: ChatRequest):
                 print("="*50 + "\n", flush=True)
                 
 # ใช้คำสั่งเป็นภาษาอังกฤษทั้งหมด เพื่อป้องกันการคิดในหัวเป็นภาษาจีน
+#                 system_instruction = f"""You are a professional English-to-Thai translator for factory operations. 
+# Your ONLY task is to extract relevant information from the context based on the user's query and translate it into Thai.
+
+# CRITICAL RULES:
+# 1. OUTPUT LANGUAGE: Strictly output in Thai language only. ABSOLUTELY NO CHINESE CHARACTERS (禁止输出中文).
+# 2. DIRECT OUTPUT: Provide ONLY the translated text. Do not add any conversational text, greetings, explanations, or meta-commentary.
+# 3. NO THINKING PROCESS: Do not output your thinking process or apologize. Just give the final translated text.
+# 4. FORMATTING: You MUST preserve the exact original formatting, including line breaks, bullet points (1., 2., -), and hierarchy. Each bullet point or sub-item MUST start on a new line. Do not merge them into a single paragraph.
+# 5. IMAGE URLS: If you see an image tag like ![](http...), ignore it in the text.
+# 6. TOPIC LISTING ONLY (CRITICAL FORMAT): If the user asks a general question like "มีข้อมูลอะไรบ้าง" or asks for available topics, DO NOT translate the detailed content. You MUST ONLY extract the main headings/topics found in the context. 
+# You MUST format the output EXACTLY as a vertical bulleted list, putting each topic on a new line.
+# Example format:
+# - Information
+# - Occurrence
+# - Containment Action
+# - Root cause analysis
+# - Corrective action
+# - Preventive action
+
+# Context for translation:
+# {clean_text_context}"""
+
                 system_instruction = f"""You are a professional English-to-Thai translator for factory operations. 
-Your ONLY task is to extract relevant information from the context based on the user's query and translate it into Thai.
+Your ONLY task is to extract relevant information from the context based on the user's query and translate it into Thai language.
 
 CRITICAL RULES:
-1. OUTPUT LANGUAGE: Strictly output in Thai language only. ABSOLUTELY NO CHINESE CHARACTERS (禁止输出中文).
-2. DIRECT OUTPUT: Provide ONLY the translated text. Do not add any conversational text, greetings, explanations, or meta-commentary.
-3. NO THINKING PROCESS: Do not output your thinking process or apologize. Just give the final translated text.
-4. FORMATTING: You MUST preserve the exact original formatting, including line breaks, bullet points (1., 2., -), and hierarchy. Each bullet point or sub-item MUST start on a new line. Do not merge them into a single paragraph.
-5. IMAGE URLS: If you see an image tag like ![](http...), ignore it in the text.
-6. TOPIC LISTING ONLY (CRITICAL FORMAT): If the user asks a general question like "มีข้อมูลอะไรบ้าง" or asks for available topics, DO NOT translate the detailed content. You MUST ONLY extract the main headings/topics found in the context. 
-You MUST format the output EXACTLY as a vertical bulleted list, putting each topic on a new line.
-Example format:
-- Information
-- Occurrence
-- Containment Action
-- Root cause analysis
-- Corrective action
-- Preventive action
+1. OUTPUT LANGUAGE: Strictly output in Thai language only (ภาษาไทยเท่านั้น). ABSOLUTELY NO CHINESE CHARACTERS AND NO ENGLISH SENTENCES.
+2. DIRECT OUTPUT: Provide ONLY the translated text. Do not add any conversational text or thinking process.
+3. FORMATTING: Translate the text, but KEEP the original Markdown elements (like ## for headings, and 1. 2. or - for lists). Each bullet point MUST start on a new line.
+4. IMAGE URLS: If you see an image tag like ![](http...), strictly ignore it.
+5. TOPIC TO PRODUCT SUMMARY (CRITICAL): If the user does NOT specify a product (e.g., "ขอข้อมูล Bad mark on SUS plate"), you MUST format the output EXACTLY like this:
+
+พบปัญหา **'[Topic Name]'** ในรุ่นสินค้าต่อไปนี้:
+
+- **Product:** [Product Name] (APN: [APN ID])
+
+💡 คุณต้องการทราบรายละเอียดหัวข้อใดเพิ่มเติม เช่น **Information, Occurrence,** หรือ **Root cause analysis** สามารถพิมพ์ถามได้เลยครับ
+6. TOPIC LISTING: If the user asks a broad question (e.g., "มีอะไรบ้าง"), ONLY list the translated main topics as bullet points.
+7. NO SELF-CORRECTION OR META-COMMENTARY: You are a machine. DO NOT evaluate your own work. DO NOT apologize. Just output the final Thai translation directly.
+8. ABSOLUTE CHINESE BAN: Under NO circumstances should any Chinese characters (Hanzi) appear in your output.
 
 Context for translation:
 {clean_text_context}"""
-                
+
+                if extracted_product is None:
+                    # กรณีไม่ระบุรุ่นสินค้า สั่งให้ตอบแค่รายชื่อรุ่น (สรุป)
+                    task_instruction = "Task: The user did NOT specify a product. ONLY list the products associated with this topic as a summary. DO NOT translate the detailed content."
+                else:
+                    # ถ้าระบุรุ่นสินค้ามาแล้ว ค่อยสั่งให้แปลเนื้อหาละเอียด
+                    task_instruction = "Task: Extract the specific details about the requested product from the context and translate into Thai. Keep the Markdown headings/bullets."
+
                 messages = [
                     SystemMessage(content=system_instruction), 
-                    HumanMessage(content=f"Query: {request.query}\nPlease translate the relevant information into Thai, keeping the exact original line breaks and formatting.")
+                    HumanMessage(content=f"Query: {request.query}\n{task_instruction}")
                 ]
                 response_object = llm.invoke(messages)
                 answer_text = response_object.content
