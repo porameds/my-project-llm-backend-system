@@ -18,7 +18,8 @@ from QA_api_upload import router as qa_faca
 # ==========================================
 #  1. Imports ทั้งหมดที่จำเป็น
 # ==========================================
-from sqlalchemy import create_engine, Column, String, Text, DateTime
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage #
+from sqlalchemy import create_engine, Column, String, Text, DateTime, Integer
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import declarative_base, sessionmaker
 
@@ -33,6 +34,13 @@ from langchain_core.prompts import PromptTemplate
 # ==========================================
 #  2. ตั้งค่าการเชื่อมต่อ (Configurations)
 # ==========================================
+
+PROMPT_DB_URL = "postgresql+psycopg2://postgres:8XFvLYV77O7upme@10.17.32.144:5432/ai"
+# สร้าง Engine และ Session แยกเฉพาะ
+prompt_engine = create_engine(PROMPT_DB_URL, pool_pre_ping=True, pool_recycle=300)
+PromptSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=prompt_engine)
+PromptBase = declarative_base() # ใช้ Base ตัวใหม่เพื่อไม่ให้ปนกับตารางเก่า
+
 CONNECTION_STRING = "postgresql+psycopg2://postgres:User%40FujikuraN1@host.docker.internal/llm_db"
 COLLECTION_NAME = "all_company_docs"
 
@@ -109,6 +117,15 @@ engine = create_engine(CONNECTION_STRING, pool_pre_ping=True, pool_recycle=300)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
+class ChatMessage(BaseModel):
+    role: str  # "user" หรือ "assistant"
+    content: str
+
+class ChatRequest(BaseModel):
+    query: str
+    department: Optional[str] = None
+    history: Optional[List[ChatMessage]] = [] # เพิ่มส่วนนี้รับ History จากหน้าบ้าน
+
 # ==========================================
 #  3. โครงสร้างตาราง Cache ใน PostgreSQL
 # ==========================================
@@ -130,14 +147,19 @@ Base.metadata.create_all(bind=engine)
 # ==========================================
 # เพิ่มตารางสำหรับเก็บ Suggested Prompts
 # ==========================================
-class SuggestedPrompt(Base):
+class SuggestedPrompt(PromptBase):
     __tablename__ = "suggested_prompts"
-    __table_args__ = {"schema": "public"}
-    id = Column(uuid.UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    department = Column(String, index=True)  # แผนกที่ปุ่มนี้จะไปปรากฎ เช่น QA_FACA
-    prompt_text = Column(Text, nullable=False) # ข้อความบนปุ่ม
-    is_active = Column(DateTime, default=datetime.utcnow) # เอาไว้เปิด/ปิดการใช้งาน (ในที่นี้ใช้ timestamp เช็ค)
-    priority = Column(Integer, default=0) # ลำดับการเรียง (เลขน้อยขึ้นก่อน)
+    __table_args__ = {"schema": "ai"}
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    department = Column(String, index=True)  
+    prompt_text = Column(Text, nullable=False) 
+    is_active = Column(DateTime, default=datetime.utcnow) 
+    priority = Column(Integer, default=0) 
+
+# สั่งสร้างตารางไปยังฐานข้อมูลตัวใหม่ที่ 10.17.32.144
+print(" กำลังตรวจสอบและสร้างตาราง SuggestedPrompt ใน DB ใหม่...")
+PromptBase.metadata.create_all(bind=prompt_engine)
 
 # ==========================================
 #  4. โหลด AI และ Tools รอไว้
@@ -208,9 +230,6 @@ sql_agent = create_sql_agent(
 
 # structured_llm = llm.with_structured_output(StructuredChatResponse)
 
-class ChatRequest(BaseModel):
-    query: str
-    department: Optional[str] = None
 
 class QueryFilterSchema(BaseModel):
     product: Optional[str] = Field(
@@ -272,15 +291,14 @@ async def chat_with_company_bot(request: ChatRequest):
             try:
                 # ใช้ Prompt แบบยกตัวอย่าง (AI จะเข้าใจและสกัดคำได้แม่นยำกว่า)
                 strict_prompt = f"""
-                Extract the Product Name or APN from the user's query.
-                
+                Extract ONLY the core Product Name (Model) from the user's query.
+                Do not add any suffix like '_test' or 'APN'.
+
                 Examples:
-                - Query: "ขอ detail RGPZ-542ML-1B หน่อย" => Product: "RGPZ-542ML-1B"
-                - Query: "สรุปปัญหา 821-05561-04" => Product: "821-05561-04"
-                - Query: "ขอ detail RGPZ-542ML-1B_test" => Product: "RGPZ-542ML-1B_test"
-                - Query: "ขอรายละเอียดหน่อย" => Product: null
-                - Query: "มีข้อมูลอะไรบ้าง" => Product: null
-                
+                - Query: "ขอข้อมูล RGPZ-542ML-1B" => Product: "RGPZ-542ML-1B"
+                - Query: "RGPZ-542ML-1B (APN: 821-05561-04)" => Product: "RGPZ-542ML-1B"
+                - Query: "ตกลงเลือกตัวนี้ RGPZ-5XXX" => Product: "RGPZ-5XXX"
+
                 Current Query: "{request.query}"
                 """
                 extracted_meta = extractor_llm.invoke(strict_prompt)
@@ -288,11 +306,10 @@ async def chat_with_company_bot(request: ChatRequest):
                 # 2. นำค่าที่สกัดได้ มาอัปเดตใส่ตัวแปร extracted_product
                 if extracted_meta and extracted_meta.product:
                     if "ข้อมูล" not in extracted_meta.product:
-                        extracted_product = extracted_meta.product
-                        logger.info(f"[SELF-QUERY] สกัดชื่อ Product ได้สำเร็จ: {extracted_product}", flush=True)
-                    else:
-                        logger.info(f"[SELF-QUERY] สกัดได้คำผิด ({extracted_meta.product}) ถือว่าหาไม่เจอ", flush=True)
-
+                        extracted_product = extracted_meta.product.split('(')[0].strip()
+                        logger.info(f"[SELF-QUERY] สกัดชื่อ Product ได้สะอาด: {extracted_product}")
+                    # else:
+                    #     logger.info(f"[SELF-QUERY] สกัดได้คำผิด ({extracted_meta.product}) ถือว่าหาไม่เจอ", flush=True)
             except Exception as e:
                 logger.warning(f"[SELF-QUERY] สกัดข้อมูลล้มเหลว: {e}")
 
@@ -313,6 +330,15 @@ async def chat_with_company_bot(request: ChatRequest):
             print("="*50 + "\n", flush=True)
             # =======================================
 
+            # --- สร้าง Search Term ใหม่โดยดึง Context จาก History ---
+            search_query = request.query
+            
+            # ถ้าคำถามรอบนี้สั้นมาก (เช่น มีแค่ชื่อรุ่น) ให้ไปดู History ว่าก่อนหน้านี้ถามหัวข้ออะไรไว้
+            if extracted_product and len(request.query) < 50:
+                history_topics = [t for t in topics if any(t in msg.content.lower() for msg in request.history)]
+                if history_topics:
+                    search_query = f"{extracted_product} {history_topics[-1]}" # เช่น "RGPZ-542ML-1B occurrence"
+                    results = vector_store.similarity_search_with_score(search_query, **search_kwargs)
             # ---------------------------------------------------------
             # ขั้นตอนที่ 2: ค้นหาข้อมูล (พร้อม Filter อัตโนมัติ)
             # ---------------------------------------------------------
@@ -377,35 +403,107 @@ CRITICAL RULES:
 2. DIRECT OUTPUT: Provide ONLY the translated text. Do not add any conversational text or thinking process.
 3. FORMATTING: Translate the text, but KEEP the original Markdown elements (like ## for headings, and 1. 2. or - for lists). Each bullet point MUST start on a new line.
 4. IMAGE URLS: If you see an image tag like ![](http...), strictly ignore it.
-5. TOPIC TO PRODUCT SUMMARY (CRITICAL): If the user does NOT specify a product (e.g., "ขอข้อมูล Bad mark on SUS plate"), you MUST format the output EXACTLY like this:
-
-พบปัญหา **'[Topic Name]'** ในรุ่นสินค้าต่อไปนี้:
-
-- **Product:** [Product Name] (APN: [APN ID])
+5. TOPIC TO PRODUCT SUMMARY: 
+   - หากผู้ใช้ถามถึงปัญหา (เช่น "Bad mark on SUS plate") โดยยังไม่ระบุรุ่น ให้ลิสต์ชื่อรุ่นสินค้าพร้อม APN ทั้งหมดที่พบใน context
+   - รูปแบบ: "พบปัญหา '[Topic]' ในรุ่นสินค้าต่อไปนี้:\nProduct: [Name] (APN: [ID])\n คุณต้องการทราบรายละเอียดหัวข้อใดเพิ่มเติม เช่น Information, Occurrence... พิมพ์ถามได้เลย"
 
 💡 คุณต้องการทราบรายละเอียดหัวข้อใดเพิ่มเติม เช่น **Information, Occurrence,** หรือ **Root cause analysis** สามารถพิมพ์ถามได้เลยครับ
 6. TOPIC LISTING: If the user asks a broad question (e.g., "มีอะไรบ้าง"), ONLY list the translated main topics as bullet points.
 7. NO SELF-CORRECTION OR META-COMMENTARY: You are a machine. DO NOT evaluate your own work. DO NOT apologize. Just output the final Thai translation directly.
 8. ABSOLUTE CHINESE BAN: Under NO circumstances should any Chinese characters (Hanzi) appear in your output.
+9. AMBIGUOUS PRODUCT SELECTION:
+   - หากพบสินค้าหลายรุ่น (2 รุ่นขึ้นไป) และผู้ใช้ถามหัวข้อโดยไม่ระบุรุ่น ให้ถามว่า "ต้องการทราบ [หัวข้อ] ของรุ่นไหน?"
+   - **สำคัญมาก:** หากใน Context มีสินค้าเพียงรุ่นเดียว (เช่น มีแค่ RGPZ-542ML-1B) ให้ "ข้าม" การถามชื่อรุ่นไปเลย และให้ตอบเนื้อหาตามหัวข้อที่ผู้ใช้เลือกทันที
+   - **สำหรับการถามครั้งแรก:** ให้ลิสต์รายชื่อสินค้าทั้งหมดที่พบก่อน แล้วถามแค่ว่า "ต้องการทราบหัวข้อใด (Information, Root Cause...)" โดย "ห้าม" ถามย้อนว่าต้องการรุ่นไหนในขั้นตอนนี้
 
 Context for translation:
 {clean_text_context}"""
 
-                if extracted_product is None:
-                    # กรณีไม่ระบุรุ่นสินค้า สั่งให้ตอบแค่รายชื่อรุ่น (สรุป)
-                    task_instruction = "Task: The user did NOT specify a product. ONLY list the products associated with this topic as a summary. DO NOT translate the detailed content."
-                else:
-                    # ถ้าระบุรุ่นสินค้ามาแล้ว ค่อยสั่งให้แปลเนื้อหาละเอียด
-                    task_instruction = "Task: Extract the specific details about the requested product from the context and translate into Thai. Keep the Markdown headings/bullets."
+# 1. แปลง History จากหน้าบ้านให้เป็นรูปแบบที่ LangChain เข้าใจ
+# 1. แปลง History โดยใช้ AIMessage ให้ถูกต้อง
+                chat_history = []
+                if request.history:
+                    for msg in request.history:
+                        if msg.role == "user":
+                            chat_history.append(HumanMessage(content=msg.content))
+                        elif msg.role == "assistant" or msg.role == "bot":
+                            chat_history.append(AIMessage(content=msg.content)) # ใช้ AIMessage
 
-                messages = [
-                    SystemMessage(content=system_instruction), 
-                    HumanMessage(content=f"Query: {request.query}\n{task_instruction}")
-                ]
-                response_object = llm.invoke(messages)
-                answer_text = response_object.content
+                # 2. ทำ Query Expansion: ถ้าคำถามสั้น (เช่น ส่งแค่ชื่อรุ่น) ให้ไปดึง "หัวข้อ" จากประวัติมาแปะด้วย
+                search_query = request.query
+                current_topic = ""
+                topics_list = ["information", "occurrence", "root cause", "corrective", "preventive", "verification"]
                 
-                final_response_dict = {
+                # หาว่าปัจจุบันคุยเรื่องหัวข้อไหนอยู่จาก History
+                for msg in reversed(request.history):
+                    found_topic = next((t for t in topics_list if t in msg.content.lower()), None)
+                    if found_topic:
+                        current_topic = found_topic
+                        break
+                
+                if extracted_product and len(request.query) < 50:
+                    search_query = f"{request.query} {current_topic}".strip()
+                    logger.info(f"[DEBUG] ขยายคำค้นหาเป็น: {search_query}")
+
+                # 3. สร้าง Task Instruction และจัดการเรื่อง "มีสินค้าเดียวไม่ต้องถามซ้ำ"
+                is_asking_topic_only = any(t in request.query.lower() for t in topics_list)
+                
+                # ดึง context มาก่อนเพื่อเช็คจำนวน product ที่มี
+                results = vector_store.similarity_search_with_score(search_query, **search_kwargs)
+                
+                # ตรวจสอบว่าใน Context มีสินค้ากี่รุ่น
+                context_products = []
+                raw_context = ""
+                source_files = []
+                if results:
+                    for doc, _ in results:
+                        p = doc.metadata.get("product")
+                        if p and p not in context_products: context_products.append(p)
+                        raw_context += f"[{doc.metadata.get('source_file')}] {doc.page_content}\n"
+                        if doc.metadata.get("source_file") not in source_files:
+                            source_files.append(doc.metadata.get("source_file"))
+
+                # ตัดสินใจ Task
+                # สมมติว่าคุณมี List ของ products ที่หาได้จาก Metadata
+# --- 1. ตรวจสอบก่อนว่าคำถามรอบนี้มี "หัวข้อ" หรือไม่ ---
+            topics_list = ["information", "occurrence", "root cause", "corrective", "preventive", "verification"]
+            # หาว่าใน query ปัจจุบันมีคำใน topics_list หรือไม่
+            current_query_topic = next((t for t in topics_list if t in request.query.lower()), None)
+
+            # --- 2. ดึงรายชื่อ Product ทั้งหมดที่มีใน Context ---
+            unique_products = []
+            if results:
+                    unique_products = list(set([doc.metadata.get('product') for doc, _ in results if doc.metadata.get('product')]))
+
+                # --- 3. กำหนด Task Instruction ตาม Logic ที่คุณต้องการ ---
+            if current_query_topic is None:
+                    # STEP 1: ผู้ใช้ถามเปิด (เช่น ขอข้อมูล...) 
+                    # ให้ลิสต์ Product และถามหาหัวข้อ โดยห้ามถามให้เลือก Product
+                    task_instruction = (
+                        "Task: First response. List all products found in the context clearly. "
+                        "Then, ask the user which topic they want to know (e.g., Information, Occurrence, Root cause). "
+                        "DO NOT ask the user to select a product name in this step."
+                    )
+            else:
+                        # STEP 2: ผู้ใช้ระบุหัวข้อแล้ว (เช่น พิมพ์ว่า 'Occurrence')
+                    if len(unique_products) == 1:
+                        # ถ้ามีสินค้าเดียว ตอบเนื้อหาหัวข้อนั้นทันที ห้ามถามซ้ำ
+                        task_instruction = f"Task: The user wants to know '{current_query_topic}'. There is only one product ({unique_products[0]}), so provide its {current_query_topic} details directly in Thai."
+                    else:
+                        # ถ้ามีหลายสินค้า ค่อยถามว่าเอารุ่นไหน
+                        task_instruction = f"Task: The user wants to know '{current_query_topic}' but there are multiple products. Ask which one they mean from the list: {', '.join(unique_products)}."
+
+                # --- 4. ส่งเข้า LLM ---
+            messages = [
+                SystemMessage(content=system_instruction.replace("{clean_text_context}", raw_context)),
+                *chat_history,
+                HumanMessage(content=f"User Query: {request.query}\n{task_instruction}")
+                ]
+                
+            response_object = llm.invoke(messages)
+            answer_text = response_object.content
+                
+            final_response_dict = {
                     "answer": answer_text,
                     "images": unique_image_urls,   
                     "sentiment": "Neutral",        
@@ -430,6 +528,48 @@ Context for translation:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         db_session.close()
+
+@app.get("/api/get-suggested-prompts")
+async def get_prompts(department: str):
+    # เปลี่ยนมาใช้ PromptSessionLocal
+    db_session = PromptSessionLocal()
+    try:
+        prompts = db_session.query(SuggestedPrompt).filter(
+            SuggestedPrompt.department == department
+        ).order_by(SuggestedPrompt.priority.asc()).all()
+        
+        return {
+            "status": "success",
+            "prompts": [p.prompt_text for p in prompts]
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    finally:
+        db_session.close()
+
+# สำหรับ API ฝั่ง Admin 
+class PromptCreate(BaseModel):
+    department: str
+    prompt_text: str
+    priority: int = 0
+
+@app.post("/api/admin/add-prompt")
+async def add_prompt(data: PromptCreate):
+    # เปลี่ยนมาใช้ PromptSessionLocal 
+    db_session = PromptSessionLocal()
+    try:
+        new_p = SuggestedPrompt(
+            department=data.department,
+            prompt_text=data.prompt_text,
+            priority=data.priority
+        )
+        db_session.add(new_p)
+        db_session.commit()
+        return {"status": "success"}
+    finally:
+        db_session.close()
+
+
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
