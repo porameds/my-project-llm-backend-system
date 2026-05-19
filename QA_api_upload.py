@@ -257,7 +257,7 @@ def pipeline_task(excel_filepath: str, department_name: str):
 @router.post("/api/upload-qa_faca/")
 async def upload_and_process_file(
     background_tasks: BackgroundTasks,
-    file: List[UploadFile] = File(...),  # <-- เปลี่ยนให้รองรับการอัปโหลดแบบ Array 
+    file: List[UploadFile] = File(...),  #
     department_name: str = Form("QA_FACA")
 ):
     upload_results = []
