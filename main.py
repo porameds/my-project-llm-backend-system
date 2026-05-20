@@ -903,6 +903,25 @@ TASK:
     finally:
         db_session.close()
 
+@app.get("/api/get-suggested-prompts")
+async def get_prompts(department: str):
+    # เปลี่ยนมาใช้ PromptSessionLocal
+    db_session = PromptSessionLocal()
+    try:
+        prompts = db_session.query(SuggestedPrompt).filter(
+            SuggestedPrompt.department == department
+        ).order_by(SuggestedPrompt.priority.asc()).all()
+        
+        return {
+            "status": "success",
+            "prompts": [p.prompt_text for p in prompts]
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    finally:
+        db_session.close()
+
+
 
 # ==========================================
 # RUN
